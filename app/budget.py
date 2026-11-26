@@ -1,4 +1,4 @@
-"""Deterministic Python cost and budget calculation module.
+"""Deterministic Python cost, budget calculation, and option selection rules.
 
 All monetary arithmetic MUST live here and never be performed by the LLM.
 """
@@ -30,11 +30,35 @@ DEFAULT_TRANSPORT_UNIT_RATE: dict[TripType, float] = {
     "adventure": 120.0,
 }
 
-DEFAULT_DAILY_MEALS_LOCAL_RATE: dict[TripType, float] = {
-    "budget": 35.0,
-    "family": 55.0,
-    "adventure": 45.0,
+DEFAULT_DAILY_LOCAL_TRAVEL_RATE: dict[TripType, float] = {
+    "budget": 10.0,
+    "family": 18.0,
+    "adventure": 15.0,
 }
+
+DEFAULT_DAILY_FOOD_RATE: dict[TripType, float] = {
+    "budget": 25.0,
+    "family": 38.0,
+    "adventure": 32.0,
+}
+
+CONTINGENCY_BUFFER_RATE: dict[TripType, float] = {
+    "budget": 0.05,
+    "family": 0.10,
+    "adventure": 0.10,
+}
+
+CURRENCY_FALLBACK_MULTIPLIER: dict[str, float] = {
+    "USD": 1.0,
+    "EUR": 1.0,
+    "GBP": 0.85,
+    "INR": 20.0,
+}
+
+
+def get_currency_multiplier(currency: str) -> float:
+    """Return fallback estimate scale factor for supported currencies."""
+    return CURRENCY_FALLBACK_MULTIPLIER.get(currency.upper(), 1.0)
 
 FREE_ACTIVITY_CATEGORIES: set[str] = {
     "park",
@@ -56,6 +80,14 @@ DEFAULT_ACTIVITY_PRICE_BY_CATEGORY: dict[str, float] = {
     "show": 30.0,
     "general": 20.0,
 }
+
+NIGHT_TRAVEL_KEYWORDS: tuple[str, ...] = (
+    "night bus",
+    "overnight",
+    "red-eye",
+    "sleeper bus",
+    "late night",
+)
 
 
 @dataclass
@@ -87,7 +119,101 @@ def compute_rooms_needed(adults: int, children: int) -> int:
     return max(1, math.ceil(weighted_guests / 2.0))
 
 
-def resolve_activity_price(activity: TimedActivity) -> tuple[float, bool, str]:
+def is_night_travel_option(text: str) -> bool:
+    """Return True if a transport mode/description indicates forbidden night travel."""
+    lower = text.lower()
+    return any(keyword in lower for keyword in NIGHT_TRAVEL_KEYWORDS)
+
+
+def select_hotel_option(
+    hotels: list[HotelCandidate],
+    trip_type: TripType,
+    prefer_cheapest: bool = False,
+) -> HotelCandidate | None:
+    """Deterministic stay selection rule per trip type and budget mode."""
+    if not hotels:
+        return None
+    fallback = DEFAULT_HOTEL_NIGHTLY_RATE[trip_type]
+
+    if prefer_cheapest or trip_type == "budget":
+        return min(
+            hotels,
+            key=lambda h: (
+                0 if h.price_per_night is not None else 1,
+                h.price_per_night if h.price_per_night is not None else fallback,
+            ),
+        )
+
+    if trip_type == "family":
+        def family_score(h: HotelCandidate) -> tuple[int, float]:
+            text = f"{h.name} {h.description} {h.tier}".lower()
+            family_bonus = 0 if any(k in text for k in ("family", "suite", "resort", "central")) else 1
+            eff_price = h.price_per_night if h.price_per_night is not None else fallback
+            return (family_bonus, eff_price)
+
+        return min(hotels, key=family_score)
+
+    def adventure_score(h: HotelCandidate) -> tuple[int, float]:
+        text = f"{h.name} {h.description} {h.tier}".lower()
+        adv_bonus = 0 if any(k in text for k in ("lodge", "camp", "hostel", "base", "trail")) else 1
+        eff_price = h.price_per_night if h.price_per_night is not None else fallback
+        return (adv_bonus, eff_price)
+
+    return min(hotels, key=adventure_score)
+
+
+def select_transport_option(
+    transports: list[TransportCandidate],
+    trip_type: TripType,
+    constraints: list[str] | None = None,
+    prefer_cheapest: bool = False,
+) -> TransportCandidate | None:
+    """Deterministic transport selection rule respecting night-travel safety constraints."""
+    if not transports:
+        return None
+    fallback = DEFAULT_TRANSPORT_UNIT_RATE[trip_type]
+    forbid_night = trip_type == "adventure" or any(
+        "night" in c.lower() for c in (constraints or [])
+    )
+
+    eligible = [
+        t
+        for t in transports
+        if not (forbid_night and is_night_travel_option(f"{t.mode} {t.description}"))
+    ]
+    pool = eligible or transports
+
+    if prefer_cheapest or trip_type == "budget":
+        return min(
+            pool,
+            key=lambda t: (
+                0 if t.price_per_person is not None else 1,
+                t.price_per_person if t.price_per_person is not None else fallback,
+            ),
+        )
+    return pool[0]
+
+
+def max_activities_for_day(
+    trip_type: TripType,
+    day_number: int,
+    total_days: int,
+    is_buffer_day: bool = False,
+    prefer_free_only: bool = False,
+) -> int:
+    """Return allowed main activity count for a day under use-case rules."""
+    if is_buffer_day:
+        return 1
+    if trip_type == "family":
+        return 2 if (day_number in (1, total_days) or prefer_free_only) else 3
+    if prefer_free_only or day_number in (1, total_days):
+        return 2
+    return 3
+
+
+def resolve_activity_price(
+    activity: TimedActivity, currency: str = "USD"
+) -> tuple[float, bool, str]:
     """Determine effective per-person price and whether it is an estimate."""
     if activity.unit_price is not None:
         return round(float(activity.unit_price), 2), False, activity.price_note
@@ -97,8 +223,13 @@ def resolve_activity_price(activity: TimedActivity) -> tuple[float, bool, str]:
     if category in FREE_ACTIVITY_CATEGORIES or "free" in note_lower:
         return 0.0, False, activity.price_note or "Listed as free/public access"
 
-    fallback = DEFAULT_ACTIVITY_PRICE_BY_CATEGORY.get(
-        category, DEFAULT_ACTIVITY_PRICE_BY_CATEGORY["general"]
+    scale = get_currency_multiplier(currency)
+    fallback = round(
+        DEFAULT_ACTIVITY_PRICE_BY_CATEGORY.get(
+            category, DEFAULT_ACTIVITY_PRICE_BY_CATEGORY["general"]
+        )
+        * scale,
+        2,
     )
     return (
         fallback,
@@ -114,58 +245,68 @@ def calculate_trip_cost(
     selected_transport: TransportCandidate | None,
     days: list[DayPlan],
 ) -> BudgetCalculationOutput:
-    """Calculate exact trip costs in Python and flag any estimates or budget overruns."""
+    """Calculate exact trip costs across stay, transport, local travel, food, activities, and buffer."""
     nights, total_days = compute_nights_and_days(request.start_date, request.end_date)
     rooms_needed = compute_rooms_needed(request.adults, request.children)
     activity_travellers = request.adults + 0.5 * request.children
     transport_travellers = request.adults + 0.75 * request.children
     currency = request.currency
+    scale = get_currency_multiplier(currency)
 
     assumptions: list[str] = [
         f"Trip duration: {nights} night(s) / {total_days} day(s).",
-        f"Hotel room allocation: {rooms_needed} room(s) for {request.adults} adult(s) and {request.children} child(ren).",
-        "Children are weighted at 0.5x adult rate for activities/meals and 0.75x for intercity transport.",
+        f"Room allocation: {rooms_needed} room(s) for {request.adults} adult(s) and {request.children} child(ren).",
+        "Children are weighted at 0.5x adult rate for activities, local travel, and food, and 0.75x for intercity transport.",
     ]
 
-    # 1. Hotel cost
     if selected_hotel and selected_hotel.price_per_night is not None:
         nightly_rate = round(float(selected_hotel.price_per_night), 2)
         hotel_is_estimated = False
-        hotel_label = f"Accommodation: {selected_hotel.name}"
+        hotel_label = f"Stay: {selected_hotel.name}"
     else:
-        nightly_rate = DEFAULT_HOTEL_NIGHTLY_RATE[trip_type]
+        nightly_rate = round(DEFAULT_HOTEL_NIGHTLY_RATE[trip_type] * scale, 2)
         hotel_is_estimated = True
         hotel_name = selected_hotel.name if selected_hotel else "Fallback Accommodation"
-        hotel_label = f"Accommodation (Estimated): {hotel_name}"
+        hotel_label = f"Stay (Estimated): {hotel_name}"
         assumptions.append(
-            f"Hotel nightly price was not found in search; estimated at {nightly_rate:.2f} {currency}/night "
+            f"Stay nightly price was not found in search; estimated at {nightly_rate:.2f} {currency}/night "
             f"for a '{trip_type}' trip."
         )
     hotel_cost = round(nightly_rate * rooms_needed * nights, 2)
 
-    # 2. Transport cost
     if selected_transport and selected_transport.price_per_person is not None:
         unit_transport = round(float(selected_transport.price_per_person), 2)
         transport_is_estimated = False
-        transport_label = f"Transportation: {selected_transport.mode}"
+        transport_label = f"Transport: {selected_transport.mode}"
     else:
-        unit_transport = DEFAULT_TRANSPORT_UNIT_RATE[trip_type]
+        unit_transport = round(DEFAULT_TRANSPORT_UNIT_RATE[trip_type] * scale, 2)
         transport_is_estimated = True
         mode_name = selected_transport.mode if selected_transport else "Intercity Transport"
-        transport_label = f"Transportation (Estimated): {mode_name}"
+        transport_label = f"Transport (Estimated): {mode_name}"
         assumptions.append(
-            f"Transport price was not found in search; estimated at {unit_transport:.2f} {currency} per adult-equivalent."
+            f"Transport fare was not found in search; estimated at {unit_transport:.2f} {currency} per adult-equivalent."
         )
     transport_cost = round(unit_transport * transport_travellers, 2)
 
-    # 3. Activities cost
+    local_travel_rate = round(DEFAULT_DAILY_LOCAL_TRAVEL_RATE[trip_type] * scale, 2)
+    local_travel_cost = round(local_travel_rate * activity_travellers * total_days, 2)
+    assumptions.append(
+        f"Local travel estimated at {local_travel_rate:.2f} {currency}/day per adult-equivalent."
+    )
+
+    food_rate = round(DEFAULT_DAILY_FOOD_RATE[trip_type] * scale, 2)
+    food_cost = round(food_rate * activity_travellers * total_days, 2)
+    assumptions.append(
+        f"Food & dining estimated at {food_rate:.2f} {currency}/day per adult-equivalent."
+    )
+
     activities_cost = 0.0
     activities_has_estimates = False
     updated_days: list[DayPlan] = []
     for day in days:
         updated_activities: list[TimedActivity] = []
         for activity in day.activities:
-            eff_price, is_est, note = resolve_activity_price(activity)
+            eff_price, is_est, note = resolve_activity_price(activity, currency=currency)
             if is_est:
                 activities_has_estimates = True
             activities_cost += eff_price * activity_travellers
@@ -185,15 +326,14 @@ def calculate_trip_cost(
             "One or more paid activities lacked listed ticket prices and use category fallback estimates."
         )
 
-    # 4. Daily meals & local transit allowance (explicit estimate)
-    daily_meal_rate = DEFAULT_DAILY_MEALS_LOCAL_RATE[trip_type]
-    meals_local_cost = round(daily_meal_rate * activity_travellers * total_days, 2)
+    subtotal = hotel_cost + transport_cost + local_travel_cost + food_cost + activities_cost
+    buffer_pct = CONTINGENCY_BUFFER_RATE[trip_type]
+    buffer_cost = round(subtotal * buffer_pct, 2)
     assumptions.append(
-        f"Meals & local transit allowance estimated at {daily_meal_rate:.2f} {currency}/day per adult-equivalent."
+        f"Contingency buffer set at {int(buffer_pct * 100)}% of direct trip costs ({buffer_cost:.2f} {currency})."
     )
 
-    # 5. Totals
-    total_cost = round(hotel_cost + transport_cost + activities_cost + meals_local_cost, 2)
+    total_cost = round(subtotal + buffer_cost, 2)
     budget = round(float(request.budget), 2)
     remaining_budget = round(budget - total_cost, 2)
     over_budget_amount = round(max(0.0, total_cost - budget), 2)
@@ -201,7 +341,7 @@ def calculate_trip_cost(
 
     line_items = [
         CostLineItem(
-            category="hotel",
+            category="stay",
             label=hotel_label,
             amount=hotel_cost,
             is_estimated=hotel_is_estimated,
@@ -215,6 +355,20 @@ def calculate_trip_cost(
             formula_note=f"{unit_transport:.2f} x {transport_travellers:.2f} traveller units",
         ),
         CostLineItem(
+            category="local_travel",
+            label="Local Travel (Estimated)",
+            amount=local_travel_cost,
+            is_estimated=True,
+            formula_note=f"{local_travel_rate:.2f} x {activity_travellers:.2f} traveller units x {total_days} day(s)",
+        ),
+        CostLineItem(
+            category="food",
+            label="Food & Dining (Estimated)",
+            amount=food_cost,
+            is_estimated=True,
+            formula_note=f"{food_rate:.2f} x {activity_travellers:.2f} traveller units x {total_days} day(s)",
+        ),
+        CostLineItem(
             category="activities",
             label="Attractions & Activities",
             amount=activities_cost,
@@ -222,11 +376,11 @@ def calculate_trip_cost(
             formula_note=f"Sum of per-activity prices x {activity_travellers:.2f} traveller units",
         ),
         CostLineItem(
-            category="meals_local",
-            label="Meals & Local Transit (Estimated)",
-            amount=meals_local_cost,
+            category="buffer",
+            label=f"Contingency Buffer ({int(buffer_pct * 100)}%)",
+            amount=buffer_cost,
             is_estimated=True,
-            formula_note=f"{daily_meal_rate:.2f} x {activity_travellers:.2f} traveller units x {total_days} day(s)",
+            formula_note=f"{int(buffer_pct * 100)}% x {subtotal:.2f} direct subtotal",
         ),
     ]
 
@@ -247,9 +401,11 @@ def calculate_trip_cost(
         hotel_is_estimated=hotel_is_estimated,
         transport_cost=transport_cost,
         transport_is_estimated=transport_is_estimated,
+        local_travel_cost=local_travel_cost,
+        food_cost=food_cost,
         activities_cost=activities_cost,
         activities_has_estimates=activities_has_estimates,
-        meals_local_cost=meals_local_cost,
+        buffer_cost=buffer_cost,
         total_cost=total_cost,
         budget=budget,
         remaining_budget=remaining_budget,

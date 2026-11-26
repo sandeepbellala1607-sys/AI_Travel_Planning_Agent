@@ -110,7 +110,10 @@ def web_search(query: str) -> str:
 
 def _extract_price_from_text(text: str) -> float | None:
     """Extract an explicit numeric price only when clearly formatted with currency symbols."""
-    match = re.search(r"(?:\$|USD\s*|EUR\s*|€|£|INR\s*|₹)\s*(\d{1,5}(?:[.,]\d{1,2})?)", text)
+    match = re.search(
+        r"(?:\$|USD\s*|EUR\s*|€|£|INR\s*|Rs\.?\s*|₹)\s*(\d{1,6}(?:,\d{3})*(?:\.\d{1,2})?)",
+        text,
+    )
     if not match:
         return None
     raw = match.group(1).replace(",", "")
@@ -427,3 +430,4 @@ def search_transport(
             )
         )
     return candidates
+

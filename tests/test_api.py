@@ -24,87 +24,97 @@ def client(tmp_path):
     set_db(None)
 
 
-def test_health_endpoint(client: TestClient):
+def test_health_and_swagger_docs(client: TestClient):
     resp = client.get("/health")
     assert resp.status_code == 200
     assert resp.json() == {"status": "ok"}
 
+    openapi = client.get("/openapi.json")
+    assert openapi.status_code == 200
+    assert client.get("/docs").status_code == 200
+    paths = openapi.json()["paths"]
+    assert "/api/trips" in paths
+    assert "/api/trips/{trip_id}/budget" in paths
+    assert "/api/trips/{trip_id}/itinerary" in paths
+    assert "/api/jobs/{job_id}" in paths
+
 
 def test_trip_request_validation_rejects_invalid_inputs(client: TestClient):
     today = date.today()
-    # 1. Start date in the past
     r1 = client.post(
         "/api/trips",
         json={
-            "destination": "Rome",
+            "destination": "Goa",
             "start_date": (today - timedelta(days=1)).isoformat(),
             "end_date": (today + timedelta(days=2)).isoformat(),
-            "budget": 1000,
+            "budget": 20000,
+            "currency": "INR",
             "adults": 2,
         },
     )
     assert r1.status_code == 422
 
-    # 2. End date not after start date
     r2 = client.post(
         "/api/trips",
         json={
-            "destination": "Rome",
+            "destination": "Goa",
             "start_date": (today + timedelta(days=2)).isoformat(),
             "end_date": (today + timedelta(days=2)).isoformat(),
-            "budget": 1000,
+            "budget": 20000,
+            "currency": "INR",
             "adults": 2,
         },
     )
     assert r2.status_code == 422
 
-    # 3. Budget <= 0
     r3 = client.post(
         "/api/trips",
         json={
-            "destination": "Rome",
+            "destination": "Goa",
             "start_date": (today + timedelta(days=2)).isoformat(),
-            "end_date": (today + timedelta(days=4)).isoformat(),
+            "end_date": (today + timedelta(days=5)).isoformat(),
             "budget": 0,
+            "currency": "INR",
             "adults": 2,
         },
     )
     assert r3.status_code == 422
 
-    # 4. Adults < 1
     r4 = client.post(
         "/api/trips",
         json={
-            "destination": "Rome",
+            "destination": "Goa",
             "start_date": (today + timedelta(days=2)).isoformat(),
-            "end_date": (today + timedelta(days=4)).isoformat(),
-            "budget": 500,
+            "end_date": (today + timedelta(days=5)).isoformat(),
+            "budget": 20000,
+            "currency": "INR",
             "adults": 0,
         },
     )
     assert r4.status_code == 422
 
 
-def test_create_plan_and_persist_itinerary(client: TestClient, monkeypatch):
+def test_create_plan_background_and_budget_endpoint(client: TestClient, monkeypatch):
     today = date.today()
     start = today + timedelta(days=2)
-    end = today + timedelta(days=4)
+    end = today + timedelta(days=5)  # 3 nights / 4 days
 
     monkeypatch.setattr(
         "app.graph.workflow.search_attractions",
         lambda req, tt: [
             AttractionCandidate(
-                name="Colosseum",
-                description="Historic arena",
-                source_url="https://example.com/colosseum",
-                category="museum",
-                price_per_person=18.0,
+                name="Baga Beach",
+                description="Popular North Goa beach",
+                source_url="https://example.com/baga",
+                category="beach",
+                price_per_person=0.0,
+                is_free=True,
             ),
             AttractionCandidate(
-                name="Villa Borghese Park",
-                description="Scenic park",
-                source_url="https://example.com/park",
-                category="park",
+                name="Aguada Fort",
+                description="Historic seaside fort",
+                source_url="https://example.com/aguada",
+                category="landmark",
                 price_per_person=0.0,
                 is_free=True,
             ),
@@ -114,11 +124,11 @@ def test_create_plan_and_persist_itinerary(client: TestClient, monkeypatch):
         "app.graph.workflow.search_hotels",
         lambda req, tt: [
             HotelCandidate(
-                name="Hotel Roma",
-                description="Central hotel",
-                source_url="https://example.com/hotel-roma",
+                name="Zostel Goa",
+                description="Budget backpacker hostel",
+                source_url="https://example.com/zostel-goa",
                 tier="budget",
-                price_per_night=90.0,
+                price_per_night=1200.0,
             )
         ],
     )
@@ -126,10 +136,10 @@ def test_create_plan_and_persist_itinerary(client: TestClient, monkeypatch):
         "app.graph.workflow.search_transport",
         lambda req, tt: [
             TransportCandidate(
-                mode="Regional Train",
-                description="Rail pass",
-                source_url="https://example.com/train",
-                price_per_person=40.0,
+                mode="Konkan Railway Express",
+                description="Affordable round-trip train",
+                source_url="https://example.com/konkan-rail",
+                price_per_person=1400.0,
             )
         ],
     )
@@ -143,33 +153,32 @@ def test_create_plan_and_persist_itinerary(client: TestClient, monkeypatch):
         ),
     )
 
-    resp = client.post(
-        "/api/trips?auto_plan=true&sync=true",
+    create_resp = client.post(
+        "/api/trips",
         json={
-            "destination": "Rome, Italy",
-            "origin": "Milan",
+            "destination": "Goa, India",
+            "origin": "Pune, India",
             "start_date": start.isoformat(),
             "end_date": end.isoformat(),
-            "budget": 1000,
-            "currency": "USD",
+            "budget": 20000,
+            "currency": "INR",
             "adults": 2,
             "children": 0,
-            "preferences": ["history", "parks"],
+            "preferences": ["beaches", "hostels", "street food"],
             "constraints": ["no late nights"],
         },
     )
-    assert resp.status_code == 201
-    body = resp.json()
-    trip_id = body["trip"]["id"]
-    job_id = body["job"]["job_id"]
-    assert body["job"]["status"] == "completed"
+    assert create_resp.status_code == 201
+    trip_id = create_resp.json()["trip"]["id"]
 
-    # Verify job endpoint
+    plan_resp = client.post(f"/api/trips/{trip_id}/plan")
+    assert plan_resp.status_code == 200
+    job_id = plan_resp.json()["job_id"]
+
     job_resp = client.get(f"/api/jobs/{job_id}")
     assert job_resp.status_code == 200
     assert job_resp.json()["status"] == "completed"
 
-    # Verify list & detail endpoints
     list_resp = client.get("/api/trips")
     assert list_resp.status_code == 200
     assert len(list_resp.json()) == 1
@@ -177,6 +186,14 @@ def test_create_plan_and_persist_itinerary(client: TestClient, monkeypatch):
     itin_resp = client.get(f"/api/trips/{trip_id}/itinerary")
     assert itin_resp.status_code == 200
     itin = itin_resp.json()
-    assert len(itin["days"]) == 3
+    assert itin["trip_type"] == "budget"
+    assert len(itin["days"]) == 4
     assert itin["cost_breakdown"]["fits_budget"] is True
     assert "does not book" in itin["disclaimer"].lower()
+
+    budget_resp = client.get(f"/api/trips/{trip_id}/budget")
+    assert budget_resp.status_code == 200
+    budget_data = budget_resp.json()
+    assert budget_data["trip_id"] == trip_id
+    assert len(budget_data["cost_breakdown"]["line_items"]) == 6
+    assert budget_data["cost_breakdown"]["fits_budget"] is True

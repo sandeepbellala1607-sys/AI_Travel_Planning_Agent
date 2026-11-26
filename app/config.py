@@ -51,3 +51,4 @@ def get_settings() -> Settings:
         database_path=os.getenv("DATABASE_PATH", "data/travel_planner.db").strip(),
         api_base_url=os.getenv("API_BASE_URL", "http://127.0.0.1:8000").strip(),
     )
+

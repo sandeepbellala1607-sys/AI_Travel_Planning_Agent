@@ -5,6 +5,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_groq import ChatGroq
 from langchain_openai import ChatOpenAI
 
+from app.budget import get_currency_multiplier
 from app.config import Settings, get_settings
 from app.schemas import TripClassification, TripRequestCreate
 
@@ -46,6 +47,7 @@ def heuristic_classify_trip(request: TripRequestCreate) -> TripClassification:
     nights = (request.end_date - request.start_date).days
     travellers = request.adults + request.children
     per_person_per_night = request.budget / max(1, nights * travellers)
+    normalized_ppn = per_person_per_night / get_currency_multiplier(request.currency)
 
     adventure_keywords = ("hike", "hiking", "trek", "adventure", "rafting", "camp", "climb", "kayak", "ski")
     if any(word in joined_prefs for word in adventure_keywords):
@@ -58,7 +60,8 @@ def heuristic_classify_trip(request: TripRequestCreate) -> TripClassification:
             trip_type="family",
             rationale="Classified as 'family' because children or family preferences are present (heuristic fallback).",
         )
-    if per_person_per_night < 120 or "budget" in joined_prefs or "cheap" in joined_prefs:
+    budget_keywords = ("budget", "cheap", "hostel", "backpack", "college", "affordable")
+    if normalized_ppn < 200 or any(word in joined_prefs for word in budget_keywords):
         return TripClassification(
             trip_type="budget",
             rationale="Classified as 'budget' based on budget-per-traveller target or cost preferences (heuristic fallback).",
@@ -100,3 +103,4 @@ def classify_trip_type(
         )
     except Exception:
         return heuristic_classify_trip(request)
+

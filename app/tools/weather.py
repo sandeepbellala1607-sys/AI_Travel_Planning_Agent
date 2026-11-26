@@ -175,3 +175,4 @@ def fetch_destination_weather(
     finally:
         if owns_client:
             http.close()
+

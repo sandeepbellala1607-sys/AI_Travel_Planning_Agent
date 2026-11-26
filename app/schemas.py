@@ -151,6 +151,8 @@ class DayPlan(BaseModel):
     date: date
     theme: str
     weather_note: str
+    rain_backup: str = ""
+    is_buffer_day: bool = False
     activities: list[TimedActivity] = Field(default_factory=list)
 
 
@@ -175,9 +177,11 @@ class CostBreakdown(BaseModel):
     hotel_is_estimated: bool
     transport_cost: float
     transport_is_estimated: bool
+    local_travel_cost: float
+    food_cost: float
     activities_cost: float
     activities_has_estimates: bool
-    meals_local_cost: float
+    buffer_cost: float
     total_cost: float
     budget: float
     remaining_budget: float
@@ -245,3 +249,15 @@ class TripDetailResponse(BaseModel):
     trip: TripRequestRecord
     latest_job: JobRecord | None = None
     itinerary: Itinerary | None = None
+
+
+class TripBudgetResponse(BaseModel):
+    """Dedicated budget and cost breakdown response for a planned trip."""
+
+    trip_id: str
+    trip_type: TripType
+    cost_breakdown: CostBreakdown
+    assumptions: list[str] = Field(default_factory=list)
+    budget_warning: str | None = None
+    adjustment_history: list[str] = Field(default_factory=list)
+

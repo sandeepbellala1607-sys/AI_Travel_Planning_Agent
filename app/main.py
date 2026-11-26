@@ -9,6 +9,7 @@ from app.graph.workflow import run_travel_planning_workflow
 from app.schemas import (
     Itinerary,
     JobRecord,
+    TripBudgetResponse,
     TripCreateResponse,
     TripDetailResponse,
     TripRequestCreate,
@@ -55,8 +56,7 @@ def _execute_planning_job(db: TravelDatabase, trip: TripRequestRecord, job_id: s
     """Run the LangGraph workflow for a trip request and persist results."""
     db.update_job_status(job_id, "running")
     try:
-        itinerary = run_travel_planning_workflow(trip)
-        db.save_itinerary(itinerary)
+        itinerary = run_travel_planning_workflow(trip, db=db)
         db.update_job_status(job_id, "completed")
         return itinerary
     except Exception as exc:
@@ -173,3 +173,26 @@ def get_trip_itinerary(trip_id: str, db: TravelDatabase = Depends(get_db)) -> It
             detail=f"No itinerary has been generated yet for trip '{trip_id}'.",
         )
     return itinerary
+
+
+@app.get("/api/trips/{trip_id}/budget", response_model=TripBudgetResponse)
+def get_trip_budget(trip_id: str, db: TravelDatabase = Depends(get_db)) -> TripBudgetResponse:
+    """Retrieve the Python-calculated budget breakdown and assumptions for a planned trip."""
+    trip = db.get_trip_request(trip_id)
+    if trip is None:
+        raise HTTPException(status_code=404, detail=f"Trip request '{trip_id}' not found.")
+    itinerary = db.get_latest_itinerary_for_trip(trip_id)
+    if itinerary is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No budget breakdown available yet for trip '{trip_id}'.",
+        )
+    return TripBudgetResponse(
+        trip_id=trip_id,
+        trip_type=itinerary.trip_type,
+        cost_breakdown=itinerary.cost_breakdown,
+        assumptions=itinerary.assumptions,
+        budget_warning=itinerary.budget_warning,
+        adjustment_history=itinerary.adjustment_history,
+    )
+

@@ -81,14 +81,19 @@ Copy-Item .env.example .env
 
 ## Running the Application
 
-### Start FastAPI Backend
+### Option 1: Start Backend & Frontend Together (Recommended)
+```powershell
+.\.venv\Scripts\python.exe run_app.py
+```
+
+### Option 2: Start FastAPI & Streamlit in Separate Terminals
+Terminal 1 (FastAPI Backend):
 ```powershell
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8000
 ```
 Interactive OpenAPI docs are available at `http://127.0.0.1:8000/docs`.
 
-### Start Streamlit Frontend
-In a separate terminal:
+Terminal 2 (Streamlit Frontend):
 ```powershell
 .\.venv\Scripts\python.exe -m streamlit run frontend/app.py
 ```
@@ -106,19 +111,20 @@ In a separate terminal:
 | `GET` | `/api/trips/{trip_id}` | Get trip request, latest job status, and latest itinerary. |
 | `GET` | `/api/jobs/{job_id}` | Poll job status (`pending`, `running`, `completed`, `failed`). |
 | `GET` | `/api/trips/{trip_id}/itinerary` | Get latest generated itinerary for a trip. |
+| `GET` | `/api/trips/{trip_id}/budget` | Get deterministic Python cost breakdown (`stay`, `transport`, `local_travel`, `food`, `activities`, `buffer`) and assumptions. |
 
-### Example `POST /api/trips?auto_plan=true&sync=true` Payload
+### Example `POST /api/trips?auto_plan=true&sync=true` Payload (Budget Travel Planner — 4-Day Goa Trip)
 ```json
 {
-  "destination": "Lisbon, Portugal",
-  "origin": "London, UK",
+  "destination": "Goa, India",
+  "origin": "Pune, India",
   "start_date": "2026-12-01",
   "end_date": "2026-12-04",
-  "budget": 1200,
-  "currency": "USD",
+  "budget": 20000,
+  "currency": "INR",
   "adults": 2,
   "children": 0,
-  "preferences": ["museums", "local food", "walking"],
+  "preferences": ["beaches", "hostels", "street food", "budget travel"],
   "constraints": ["no late nights"]
 }
 ```
@@ -129,3 +135,4 @@ In a separate terminal:
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -v
 ```
+

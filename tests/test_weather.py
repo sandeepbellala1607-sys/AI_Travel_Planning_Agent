@@ -98,3 +98,4 @@ def test_weather_unknown_destination():
     assert report.available is False
     assert "not available" in report.message.lower()
     assert describe_wmo_code(95) == "Thunderstorm"
+
